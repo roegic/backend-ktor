@@ -1,40 +1,49 @@
-# ktor-server
+# BondBuddy — Ktor Server
 
-This project was created using the [Ktor Project Generator](https://start.ktor.io).
+Этот репозиторий содержит исходный код серверной части приложения **BondBuddy**, разработанной с использованием Kotlin и фреймворка **Ktor**. Сервер реализует **REST API** для управления пользователями, аутентификации, подбора собеседников, работы с интересами и взаимодействия с базой данных **PostgreSQL**.
 
-Here are some useful links to get you started:
+---
 
-- [Ktor Documentation](https://ktor.io/docs/home.html)
-- [Ktor GitHub page](https://github.com/ktorio/ktor)
-- The [Ktor Slack chat](https://app.slack.com/client/T09229ZC6/C0A974TJ9). You'll need
-  to [request an invite](https://surveys.jetbrains.com/s3/kotlin-slack-sign-up) to join.
+## Требования
 
-## Features
+- JDK 20+
+- Gradle
+- Docker и Docker Compose — для запуска PostgreSQL
+- PostgreSQL 15+ (если не используется Docker)
 
-Here's a list of features included in this project:
+---
 
-| Name                                               | Description                                                 |
-|----------------------------------------------------|-------------------------------------------------------------|
-| [Routing](https://start.ktor.io/p/routing-default) | Allows to define structured routes and associated handlers. |
+## Развертывание
 
-## Building & Running
+### 1. Клонирование проекта
 
-To build or run the project, use one of the following tasks:
-
-| Task                          | Description                                                          |
-|-------------------------------|----------------------------------------------------------------------|
-| `./gradlew test`              | Run the tests                                                        |
-| `./gradlew build`             | Build everything                                                     |
-| `buildFatJar`                 | Build an executable JAR of the server with all dependencies included |
-| `buildImage`                  | Build the docker image to use with the fat JAR                       |
-| `publishImageToLocalRegistry` | Publish the docker image locally                                     |
-| `run`                         | Run the server                                                       |
-| `runDocker`                   | Run using the local docker image                                     |
-
-If the server starts successfully, you'll see the following output:
-
-```
-2024-12-04 14:32:45.584 [main] INFO  Application - Application started in 0.303 seconds.
-2024-12-04 14:32:45.682 [main] INFO  Application - Responding at http://0.0.0.0:8080
+```bash
+git clone git@github.com:roegic/backend-ktor.git
+cd backend-ktor
 ```
 
+### 2. Запуск PostgreSQL через Docker Compose
+
+```bash
+docker-compose up --build
+```
+
+### 3. Запуск сервера
+
+```bash
+./gradlew run
+```
+
+---
+
+## Переменные окружения (опционально)
+
+Для настройки подключения к базе данных и обеспечения безопасности рекомендуется использовать переменные окружения. Если переменные окружения не заданы, будут использованы значения по умолчанию.
+
+Следующие переменные окружения могут быть настроены:
+*   `DATABASE_URL`: URL для подключения к базе данных PostgreSQL.
+*   `DATABASE_USER`: Имя пользователя для подключения к базе данных PostgreSQL.
+*   `DATABASE_PASSWORD`: Пароль для подключения к базе данных PostgreSQL.
+*   `JDBC_DRIVER`: Драйвер JDBC для PostgreSQL. 
+*   `JWT_SECRET`: Секретный ключ для подписи JWT-токенов.  Рекомендуется использовать сложную и случайную строку.
+*   `HASH_SECRET_KEY`: Секретный ключ, используемый для хеширования паролей. Рекомендуется использовать сложную и случайную строку.
