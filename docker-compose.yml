@@ -1,4 +1,14 @@
 services:
+  web:
+    build: .
+    container_name: nlp_recommender
+    ports:
+      - "8085:8085"
+    depends_on:
+      - db
+    environment:
+      - FLASK_ENV=development
+
   db:
     image: postgres:15
     restart: always

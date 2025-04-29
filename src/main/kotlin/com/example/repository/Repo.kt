@@ -39,10 +39,6 @@ data class UserApiData(
     val occupation: String?
 )
 
-@Serializable
-data class RecommendationApiResponse(
-    val recommended_ids: List<Int>
-)
 data class CombinedScoreUser(
     val userInfo: UserInfo,
     val tagMatchScore: Int,
@@ -134,8 +130,8 @@ class Repo {
 
     suspend fun getUsersRankedByInterests(
         userId: Int,
-        alpha: Double = 0.0,
-        beta: Double = 1.7,
+        alpha: Double = 0.6,
+        beta: Double = 0.4,
         topKApi: Int? = null,
         finalTopK: Int? = null
     ): List<UserInfo> {
