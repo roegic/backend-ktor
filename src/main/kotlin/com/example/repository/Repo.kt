@@ -3,6 +3,9 @@ package com.example.repository
 import com.example.data.model.*
 import com.example.data.table.*
 import com.example.repository.DatabaseFactory.dbQuery
+import io.ktor.client.*
+import io.ktor.http.cio.*
+import kotlinx.coroutines.withContext
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 
@@ -10,7 +13,95 @@ import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.transactions.transaction
 
+import kotlinx.serialization.Serializable
+
+import io.ktor.client.*
+import io.ktor.client.call.*
+import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.contentnegotiation.*
+import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.*
+import kotlinx.serialization.json.Json
+import io.ktor.client.request.*
+
+@Serializable
+data class RecommendationApiRequest(
+    val user_id: Int,
+    val users_data: List<UserApiData>,
+    val top_k: Int = 20
+)
+
+@Serializable
+data class UserApiData(
+    val id: Int,
+    val bio: String?,
+    val interests: String?,
+    val occupation: String?
+)
+
+@Serializable
+data class RecommendationApiResponse(
+    val recommended_ids: List<Int>
+)
+data class CombinedScoreUser(
+    val userInfo: UserInfo,
+    val tagMatchScore: Int,
+    val cosineScore: Double,
+    val totalScore: Double
+)
+@Serializable
+data class RecommendationWithScore(
+    val id: Int,
+    val score: Double
+)
+@Serializable
+data class ApiResponseWithScores(
+    val recommendations: List<RecommendationWithScore>
+)
+
+
+val httpClient = HttpClient(CIO) {
+    install(ContentNegotiation) {
+        json(Json {
+            ignoreUnknownKeys = true
+            prettyPrint = true
+            isLenient = true
+        })
+    }
+}
+
 class Repo {
+    suspend fun getAllUsersForRecommendations(currentUserId: Int): List<UserInfo> {
+        return dbQuery {
+            UserInfoTable
+                .selectAll()
+                .map { rowToUserInfo(it) }
+        }
+    }
+
+    suspend fun getUsersByIds(userIds: List<Int>): List<UserInfo> {
+        if (userIds.isEmpty()) return emptyList()
+        return dbQuery {
+            UserInfoTable
+                .selectAll().where { UserInfoTable.userId inList userIds }
+                .map { rowToUserInfo(it) }
+        }
+    }
+
+    private fun rowToUserInfo(row: ResultRow): UserInfo {
+        return UserInfo(
+            userId = row[UserInfoTable.userId],
+            firstName = row[UserInfoTable.firstName],
+            lastName = row[UserInfoTable.lastName],
+            age = row[UserInfoTable.age],
+            bio = row[UserInfoTable.bio],
+            country = row[UserInfoTable.country],
+            city = row[UserInfoTable.city],
+            occupation = row[UserInfoTable.occupation],
+            photo = row[UserInfoTable.photo],
+            interests = row[UserInfoTable.interests]
+        )
+    }
 
     suspend fun addUser(user: User) {
         dbQuery {
@@ -22,52 +113,112 @@ class Repo {
         }
     }
 
-    suspend fun getUsersRankedByInterests(userId: Int): List<UserInfo> {
+    private suspend fun getAllUsersWithTags(): Map<Int, Pair<UserInfo, Set<Int>>> {
         return dbQuery {
-            val currentUserInterestTagIds = UserInterestsTable
-                .select(UserInterestsTable.interestTagId)
-                .where { UserInterestsTable.userId eq userId }
-                .map { it[UserInterestsTable.interestTagId] }
+            val userMap = mutableMapOf<Int, Pair<UserInfo, MutableSet<Int>>>()
 
-            val allUsers = UserInfoTable
-                .join(UserInterestsTable, JoinType.INNER, UserInfoTable.userId, UserInterestsTable.userId)
-                .select(
-                    UserInfoTable.userId, UserInfoTable.firstName, UserInfoTable.lastName,
-                    UserInfoTable.age, UserInfoTable.bio, UserInfoTable.country,
-                    UserInfoTable.city, UserInfoTable.occupation, UserInfoTable.photo, UserInfoTable.interests,
-                    UserInterestsTable.interestTagId
-                )
-                .where { UserInfoTable.userId neq userId }
-
-            val rankedUsers = allUsers.groupBy { row ->
-                row[UserInfoTable.userId]
-            }.map { (userId, rows) ->
-                val otherUserInterestTagIds = rows.map { it[UserInterestsTable.interestTagId] }
-
-                val matchingCount = currentUserInterestTagIds.intersect(otherUserInterestTagIds.toSet()).size
-
-                Pair(
-                    UserInfo(
-                        userId = rows.first()[UserInfoTable.userId],
-                        firstName = rows.first()[UserInfoTable.firstName],
-                        lastName = rows.first()[UserInfoTable.lastName],
-                        age = rows.first()[UserInfoTable.age],
-                        bio = rows.first()[UserInfoTable.bio],
-                        country = rows.first()[UserInfoTable.country],
-                        city = rows.first()[UserInfoTable.city],
-                        occupation = rows.first()[UserInfoTable.occupation],
-                        photo = rows.first()[UserInfoTable.photo],
-                        interests = rows.first()[UserInfoTable.interests]
-                    ),
-                    matchingCount
-                )
-            }.filter { it.second >= 0 }
-
-            rankedUsers.sortedWith(
-                compareByDescending<Pair<UserInfo, Int>> { it.second }
-                    .thenBy { it.first.userId }
-            ).map { it.first }
+            UserInfoTable
+                .leftJoin(UserInterestsTable, { UserInfoTable.userId }, { UserInterestsTable.userId })
+                .selectAll()
+                .forEach { row ->
+                    val userId = row[UserInfoTable.userId]
+                    val userInfo = userMap.getOrPut(userId) {
+                        Pair(rowToUserInfo(row), mutableSetOf())
+                    }.first
+                    val tagId = row.getOrNull(UserInterestsTable.interestTagId)
+                    tagId?.let { userMap[userId]?.second?.add(it) }
+                }
+            userMap.mapValues { it.value.first to it.value.second.toSet() }
         }
+    }
+
+    suspend fun getUsersRankedByInterests(
+        userId: Int,
+        alpha: Double = 0.0,
+        beta: Double = 1.7,
+        topKApi: Int? = null,
+        finalTopK: Int? = null
+    ): List<UserInfo> {
+
+        val allUsersWithTags = getAllUsersWithTags()
+        val currentUserData = allUsersWithTags[userId] ?: return emptyList()
+        val currentUserInfo = currentUserData.first
+        val currentUserInterestTagIds = currentUserData.second
+
+        val usersApiData = allUsersWithTags.values.map { (userInfo, _) ->
+            UserApiData(
+                id = userInfo.userId,
+                bio = userInfo.bio,
+                interests = userInfo.interests,
+                occupation = userInfo.occupation
+            )
+        }
+
+        val apiRequest = RecommendationApiRequest(
+            user_id = userId,
+            users_data = usersApiData,
+            top_k = topKApi ?: usersApiData.size
+        )
+
+        var cosineScoresMap: Map<Int, Double>? = null
+
+        try {
+            println("Send request to recommendation API")
+            val response = httpClient.post("http://localhost:8085/recommendations_with_scores/") {
+                contentType(ContentType.Application.Json)
+                setBody(apiRequest)
+            }
+
+            if (response.status == HttpStatusCode.OK) {
+                val apiResponse = response.body<ApiResponseWithScores>()
+                cosineScoresMap = apiResponse.recommendations.associate { it.id to it.score }
+                println("Received ${cosineScoresMap.size} cosine similarity scores.")
+            } else {
+                val errorBody = response.body<String>()
+                println("Error recommendation API: ${response.status} - $errorBody")
+            }
+        } catch (e: Exception) {
+            println("Exception during recommendation API call: ${e.message}")
+        }
+
+        val useCosine = cosineScoresMap != null
+
+        val combinedScores = mutableListOf<CombinedScoreUser>()
+
+        allUsersWithTags.forEach { (otherUserId, data) ->
+            if (otherUserId == userId) return@forEach
+
+            val otherUserInfo = data.first
+            val otherUserInterestTagIds = data.second
+
+            val tagMatchScore = currentUserInterestTagIds.intersect(otherUserInterestTagIds).size
+            val cosineScore = cosineScoresMap?.get(otherUserId) ?: 0.0
+
+            val totalScore = if (useCosine)
+                alpha * tagMatchScore + beta * cosineScore // вычисление формулы схожих пользователей
+            else
+                tagMatchScore.toDouble()
+
+            combinedScores.add(
+                CombinedScoreUser(
+                    userInfo = otherUserInfo,
+                    tagMatchScore = tagMatchScore,
+                    cosineScore = cosineScore,
+                    totalScore = totalScore
+                )
+            )
+        }
+
+        val finalRecommendations = combinedScores
+            .sortedWith(
+                compareByDescending<CombinedScoreUser> { it.totalScore }
+                    .thenByDescending { it.cosineScore }
+                    .thenByDescending { it.tagMatchScore }
+                    .thenBy { it.userInfo.userId }
+            )
+            .take(finalTopK ?: combinedScores.size)
+
+        return finalRecommendations.map { it.userInfo }
     }
 
     private fun getUsersRankedByInterestsSync(userId: Int): List<UserInfo> {
